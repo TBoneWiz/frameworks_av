@@ -436,8 +436,9 @@ MtpObjectHandle MtpDevice::sendObjectInfo(MtpObjectInfo* info) {
         parent = MTP_PARENT_ROOT;
 
     mRequest.setParameter(1, info->mStorageID);
-    mRequest.setParameter(2, info->mParent);
+    mRequest.setParameter(2, parent);
 
+    mData.reset();
     mData.putUInt32(info->mStorageID);
     mData.putUInt16(info->mFormat);
     mData.putUInt16(info->mProtectionStatus);
@@ -813,7 +814,7 @@ bool MtpDevice::sendData() {
     mData.setTransactionID(mRequest.getTransactionID());
     int ret = mData.write(mRequestOut);
     mData.dump();
-    return (ret > 0);
+    return (ret >= 0);
 }
 
 bool MtpDevice::readData() {
