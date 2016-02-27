@@ -20,6 +20,7 @@
 
 #include "include/WAVExtractor.h"
 
+#include <audio_utils/primitives.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/DataSource.h>
 #include <media/stagefright/MediaBufferGroup.h>
@@ -37,6 +38,7 @@ namespace android {
 
 enum {
     WAVE_FORMAT_PCM        = 0x0001,
+    WAVE_FORMAT_IEEE_FLOAT = 0x0003,
     WAVE_FORMAT_ALAW       = 0x0006,
     WAVE_FORMAT_MULAW      = 0x0007,
     WAVE_FORMAT_MSGSM      = 0x0031,
@@ -178,6 +180,7 @@ status_t WAVExtractor::init() {
 
             mWaveFormat = U16_LE_AT(formatSpec);
             if (mWaveFormat != WAVE_FORMAT_PCM
+                    && mWaveFormat != WAVE_FORMAT_IEEE_FLOAT
                     && mWaveFormat != WAVE_FORMAT_ALAW
                     && mWaveFormat != WAVE_FORMAT_MULAW
                     && mWaveFormat != WAVE_FORMAT_MSGSM
@@ -215,24 +218,6 @@ status_t WAVExtractor::init() {
 
             mBitsPerSample = U16_LE_AT(&formatSpec[14]);
 
-            if (mWaveFormat == WAVE_FORMAT_PCM
-                    || mWaveFormat == WAVE_FORMAT_EXTENSIBLE) {
-                if (mBitsPerSample != 8 && mBitsPerSample != 16
-                    && mBitsPerSample != 24) {
-                    return ERROR_UNSUPPORTED;
-                }
-            } else if (mWaveFormat == WAVE_FORMAT_MSGSM) {
-                if (mBitsPerSample != 0) {
-                    return ERROR_UNSUPPORTED;
-                }
-            } else {
-                CHECK(mWaveFormat == WAVE_FORMAT_MULAW
-                        || mWaveFormat == WAVE_FORMAT_ALAW);
-                if (mBitsPerSample != 8) {
-                    return ERROR_UNSUPPORTED;
-                }
-            }
-
             if (mWaveFormat == WAVE_FORMAT_EXTENSIBLE) {
                 uint16_t validBitsPerSample = U16_LE_AT(&formatSpec[18]);
                 if (validBitsPerSample != mBitsPerSample) {
@@ -264,15 +249,32 @@ status_t WAVExtractor::init() {
                 // In a WAVE_EXT header, the first two bytes of the GUID stored at byte 24 contain
                 // the sample format, using the same definitions as a regular WAV header
                 mWaveFormat = U16_LE_AT(&formatSpec[24]);
-                if (mWaveFormat != WAVE_FORMAT_PCM
-                        && mWaveFormat != WAVE_FORMAT_ALAW
-                        && mWaveFormat != WAVE_FORMAT_MULAW) {
-                    return ERROR_UNSUPPORTED;
-                }
                 if (memcmp(&formatSpec[26], WAVEEXT_SUBFORMAT, 14)) {
                     ALOGE("unsupported GUID");
                     return ERROR_UNSUPPORTED;
                 }
+            }
+
+            if (mWaveFormat == WAVE_FORMAT_PCM) {
+                if (mBitsPerSample != 8 && mBitsPerSample != 16
+                    && mBitsPerSample != 24 && mBitsPerSample != 32) {
+                    return ERROR_UNSUPPORTED;
+                }
+            } else if (mWaveFormat == WAVE_FORMAT_IEEE_FLOAT) {
+                if (mBitsPerSample != 32) {  // TODO we don't support double
+                    return ERROR_UNSUPPORTED;
+                }
+            }
+            else if (mWaveFormat == WAVE_FORMAT_MSGSM) {
+                if (mBitsPerSample != 0) {
+                    return ERROR_UNSUPPORTED;
+                }
+            } else if (mWaveFormat == WAVE_FORMAT_MULAW || mWaveFormat == WAVE_FORMAT_ALAW) {
+                if (mBitsPerSample != 8) {
+                    return ERROR_UNSUPPORTED;
+                }
+            } else {
+                return ERROR_UNSUPPORTED;
             }
 
             mValidFormat = true;
@@ -285,6 +287,7 @@ status_t WAVExtractor::init() {
 
                 switch (mWaveFormat) {
                     case WAVE_FORMAT_PCM:
+                    case WAVE_FORMAT_IEEE_FLOAT:
                         mTrackMeta->setCString(
                                 kKeyMIMEType, MEDIA_MIMETYPE_AUDIO_RAW);
                         mTrackMeta->setInt32(kKeyBitsPerSample, mBitsPerSample);
@@ -484,47 +487,39 @@ status_t WAVSource::read(
 
     buffer->set_range(0, n);
 
-    if (mWaveFormat == WAVE_FORMAT_PCM || mWaveFormat == WAVE_FORMAT_EXTENSIBLE) {
+    // TODO: add capability to return data as float PCM instead of 16 bit PCM.
+    if (mWaveFormat == WAVE_FORMAT_PCM) {
         if (mBitsPerSample == 8) {
             // Convert 8-bit unsigned samples to 16-bit signed.
 
+            // Create new buffer with 2 byte wide samples
             MediaBuffer *tmp;
             CHECK_EQ(mGroup->acquire_buffer(&tmp), (status_t)OK);
-
-            // The new buffer holds the sample number of samples, but each
-            // one is 2 bytes wide.
             tmp->set_range(0, 2 * n);
 
-            int16_t *dst = (int16_t *)tmp->data();
-            const uint8_t *src = (const uint8_t *)buffer->data();
-            ssize_t numBytes = n;
-
-            while (numBytes-- > 0) {
-                *dst++ = ((int16_t)(*src) - 128) * 256;
-                ++src;
-            }
-
+            memcpy_to_i16_from_u8((int16_t *)tmp->data(), (const uint8_t *)buffer->data(), n);
             buffer->release();
             buffer = tmp;
         } else if (mBitsPerSample == 24) {
-            // Padding done here to convert to 32-bit samples
-            MediaBuffer *tmp;
-            CHECK_EQ(mGroup->acquire_buffer(&tmp), (status_t)OK);
-            ssize_t numBytes = buffer->range_length() / 3;
-            tmp->set_range(0, 4 * numBytes);
-            int8_t *dst = (int8_t *)tmp->data();
-            const uint8_t *src = (const uint8_t *)buffer->data();
-            ALOGV("numBytes = %zd", numBytes);
-            while(numBytes-- > 0) {
-               *dst++ = 0x0;
-               *dst++ = src[0];
-               *dst++ = src[1];
-               *dst++ = src[2];
-               src += 3;
-            }
-            buffer->release();
-            buffer = tmp;
-            ALOGV("length = %zu", buffer->range_length());
+            // Convert 24-bit signed samples to 16-bit signed in place
+            const size_t numSamples = n / 3;
+
+            memcpy_to_i16_from_p24((int16_t *)buffer->data(), (const uint8_t *)buffer->data(), numSamples);
+            buffer->set_range(0, 2 * numSamples);
+        }  else if (mBitsPerSample == 32) {
+            // Convert 32-bit signed samples to 16-bit signed in place
+            const size_t numSamples = n / 4;
+
+            memcpy_to_i16_from_i32((int16_t *)buffer->data(), (const int32_t *)buffer->data(), numSamples);
+            buffer->set_range(0, 2 * numSamples);
+        }
+    } else if (mWaveFormat == WAVE_FORMAT_IEEE_FLOAT) {
+        if (mBitsPerSample == 32) {
+            // Convert 32-bit float samples to 16-bit signed in place
+            const size_t numSamples = n / 4;
+
+            memcpy_to_i16_from_float((int16_t *)buffer->data(), (const float *)buffer->data(), numSamples);
+            buffer->set_range(0, 2 * numSamples);
         }
     }
 
