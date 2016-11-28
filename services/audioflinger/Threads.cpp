@@ -3382,7 +3382,8 @@ AudioFlinger::MixerThread::MixerThread(const sp<AudioFlinger>& audioFlinger, Aud
     :   PlaybackThread(audioFlinger, output, id, device, type, systemReady),
         // mAudioMixer below
         // mFastMixer below
-        mFastMixerFutex(0)
+        mFastMixerFutex(0),
+        mFastMixerIdlePending(false)
         // mOutputSink below
         // mPipeSink below
         // mNormalSink below
@@ -3601,16 +3602,20 @@ ssize_t AudioFlinger::MixerThread::threadLoop_write()
         FastMixerState *state = sq->begin();
         if (state->mCommand != FastMixerState::MIX_WRITE &&
                 (kUseFastMixer != FastMixer_Dynamic || state->mTrackMask > 1)) {
-            if (state->mCommand == FastMixerState::COLD_IDLE) {
+            if (state->mCommand == FastMixerState::COLD_IDLE || mFastMixerIdlePending) {
+
+                mFastMixerIdlePending = false;
 
                 // FIXME workaround for first HAL write being CPU bound on some devices
                 ATRACE_BEGIN("write");
                 mOutput->write((char *)mSinkBuffer, 0);
                 ATRACE_END();
 
-                int32_t old = android_atomic_inc(&mFastMixerFutex);
-                if (old == -1) {
-                    (void) syscall(__NR_futex, &mFastMixerFutex, FUTEX_WAKE_PRIVATE, 1);
+                if (state->mCommand == FastMixerState::COLD_IDLE) {
+                    int32_t old = android_atomic_inc(&mFastMixerFutex);
+                    if (old == -1) {
+                        (void) syscall(__NR_futex, &mFastMixerFutex, FUTEX_WAKE_PRIVATE, 1);
+                    }
                 }
 #ifdef AUDIO_WATCHDOG
                 if (mAudioWatchdog != 0) {
@@ -3642,10 +3647,20 @@ void AudioFlinger::MixerThread::threadLoop_standby()
         FastMixerStateQueue *sq = mFastMixer->sq();
         FastMixerState *state = sq->begin();
         if (!(state->mCommand & FastMixerState::IDLE)) {
-            state->mCommand = FastMixerState::COLD_IDLE;
-            state->mColdFutexAddr = &mFastMixerFutex;
-            state->mColdGen++;
-            mFastMixerFutex = 0;
+            // if standby is called due to output suspended, when
+            // 1): for dynamic usage, if there are FAST tracks OR
+            // 2): for none dynamic usage, if there are active tracks
+            // we still need to mix the data for tracks but not write to HAL
+            if (isSuspended () && ((kUseFastMixer == FastMixer_Dynamic && state->mTrackMask > 1) ||
+                   (kUseFastMixer != FastMixer_Dynamic && mActiveTracks.size()))) {
+                state->mCommand = FastMixerState::MIX;
+                mFastMixerIdlePending = true;
+            } else {
+                state->mCommand = FastMixerState::COLD_IDLE;
+                state->mColdFutexAddr = &mFastMixerFutex;
+                state->mColdGen++;
+                mFastMixerFutex = 0;
+            }
             sq->end();
             // BLOCK_UNTIL_PUSHED would be insufficient, as we need it to stop doing I/O now
             sq->push(FastMixerStateQueue::BLOCK_UNTIL_ACKED);
@@ -3720,6 +3735,26 @@ void AudioFlinger::MixerThread::threadLoop_mix()
 
     // mix buffers...
     mAudioMixer->process(pts);
+    // for mixerthread with fastmixer enabled, if it's already suspended, start mixing when
+    // 1) for dynamic usage and there are active FAST tracks
+    // 2) for none dynmaic usage, always enable mixing
+    if (mFastMixer != 0 && isSuspended()) {
+        FastMixerStateQueue *sq = mFastMixer->sq();
+        FastMixerState *state = sq->begin();
+        if (state->mCommand == FastMixerState::COLD_IDLE && (kUseFastMixer != FastMixer_Dynamic ||
+                (kUseFastMixer == FastMixer_Dynamic && state->mTrackMask > 1))) {
+            int32_t old = android_atomic_inc(&mFastMixerFutex);
+            if (old == -1) {
+                (void) syscall(__NR_futex, &mFastMixerFutex, FUTEX_WAKE_PRIVATE, 1);
+            }
+            state->mCommand = FastMixerState::MIX;
+            sq->end();
+            sq->push(FastMixerStateQueue::BLOCK_UNTIL_PUSHED);
+            mFastMixerIdlePending = true;
+        } else {
+            sq->end(false /*didModify*/);
+        }
+    }
     mCurrentWriteLength = mSinkBufferSize;
     // increase sleep time progressively when application underrun condition clears.
     // Only increase sleep time if the mixer is ready for two consecutive times to avoid
@@ -4287,7 +4322,7 @@ track_is_ready: ;
         state->mFastTracksGen++;
         // if the fast mixer was active, but now there are no fast tracks, then put it in cold idle
         if (kUseFastMixer == FastMixer_Dynamic &&
-                state->mCommand == FastMixerState::MIX_WRITE && state->mTrackMask <= 1) {
+                (state->mCommand & FastMixerState::MIX_WRITE) && state->mTrackMask <= 1) {
             state->mCommand = FastMixerState::COLD_IDLE;
             state->mColdFutexAddr = &mFastMixerFutex;
             state->mColdGen++;
@@ -4299,6 +4334,8 @@ track_is_ready: ;
             // so that fast mixer stops doing I/O.
             block = FastMixerStateQueue::BLOCK_UNTIL_ACKED;
             pauseAudioWatchdog = true;
+            if (mFastMixerIdlePending)
+                mFastMixerIdlePending = false;
         }
     }
     if (sq != NULL) {
@@ -4376,6 +4413,19 @@ track_is_ready: ;
     // DOLBY_AUDIO_DUMP
     EffectDapController::instance()->checkDumpEnable();
 #endif // DOLBY_END
+
+    // if no more ative tracks available, put the fastmixer into COLD_IDLE
+    if (mFastMixerIdlePending && !mActiveTracks.size()) {
+        state = sq->begin();
+        state->mCommand = FastMixerState::COLD_IDLE;
+        state->mColdFutexAddr = &mFastMixerFutex;
+        state->mColdGen++;
+        mFastMixerFutex = 0;
+        // I/O was already stopped during standby, no need to wait for ack
+        sq->end();
+        sq->push(FastMixerStateQueue::BLOCK_UNTIL_PUSHED);
+        mFastMixerIdlePending = false;
+    }
     return mixerStatus;
 }
 
