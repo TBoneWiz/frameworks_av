@@ -382,8 +382,8 @@ status_t WAVSource::start(MetaData * /* params */) {
     mGroup = new MediaBufferGroup;
     mGroup->add_buffer(new MediaBuffer(kMaxFrameSize));
 
-    if (mBitsPerSample == 8 || mBitsPerSample == 24) {
-        // As a temporary buffer for 8->16/24->32 bit conversion.
+    if (mBitsPerSample == 8) {
+        // As a temporary buffer for 8->16 bit conversion.
         mGroup->add_buffer(new MediaBuffer(kMaxFrameSize));
     }
 
@@ -443,13 +443,9 @@ status_t WAVSource::read(
     }
 
     // make sure that maxBytesToRead is multiple of 3, in 24-bit case
-    size_t maxBytesToRead;
-    if(8 == mBitsPerSample)
-        maxBytesToRead = kMaxFrameSize / 2;
-    else if (24 == mBitsPerSample) {
-        maxBytesToRead = 3*(kMaxFrameSize/4);
-    } else
-        maxBytesToRead = kMaxFrameSize;
+    size_t maxBytesToRead =
+        mBitsPerSample == 8 ? kMaxFrameSize / 2 : 
+        (mBitsPerSample == 24 ? 3*(kMaxFrameSize/3): kMaxFrameSize);
     ALOGV("%s mBitsPerSample %d, kMaxFrameSize %zu, ",
           __func__, mBitsPerSample, kMaxFrameSize);
 
