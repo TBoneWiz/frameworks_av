@@ -53,6 +53,8 @@ extern "C" const struct effect_interface_s gLvmEffectInterface;
         }\
     }
 
+// Maximum command/reply size expected
+#define EFFECT_PARAM_SIZE_MAX       65536
 
 static inline int16_t clamp16(int32_t sample)
 {
