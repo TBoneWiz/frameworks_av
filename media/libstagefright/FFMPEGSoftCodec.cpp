@@ -817,7 +817,7 @@ status_t FFMPEGSoftCodec::setSupportedRole(
         { MEDIA_MIMETYPE_VIDEO_DIVX311,
           "video_decoder.divx", NULL },
         { MEDIA_MIMETYPE_VIDEO_WMV,
-          "video_decoder.vc1",  NULL }, // so we can still talk to hardware codec
+          "video_decoder.wmv",  NULL }, // so we bypass hardware codec
         { MEDIA_MIMETYPE_VIDEO_VC1,
           "video_decoder.vc1", NULL },
         { MEDIA_MIMETYPE_VIDEO_RV,
