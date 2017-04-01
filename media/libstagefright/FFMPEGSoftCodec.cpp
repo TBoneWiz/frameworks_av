@@ -203,10 +203,10 @@ const char* FFMPEGSoftCodec::overrideComponentName(
     if (!strncasecmp(mime, MEDIA_MIMETYPE_VIDEO_WMV, strlen(MEDIA_MIMETYPE_VIDEO_WMV)) &&
             meta->findInt32(kKeyWMVVersion, &wmvVersion)) {
         ALOGD("Found WMV version key %d", wmvVersion);
-        if (wmvVersion != 2) {
+//        if (wmvVersion != 2) {
             ALOGD("Use FFMPEG for unsupported WMV track");
             componentName = "OMX.ffmpeg.wmv.decoder";
-        }
+//        }
     }
 
     int32_t encodeOptions = 0;
