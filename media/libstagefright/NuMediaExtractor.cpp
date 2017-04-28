@@ -280,6 +280,10 @@ status_t NuMediaExtractor::selectTrack(size_t index) {
 
     sp<MediaSource> source = mImpl->getTrack(index);
 
+    if (source == nullptr) {
+        return ERROR_MALFORMED;
+    }
+
     CHECK_EQ((status_t)OK, source->start());
 
     mSelectedTracks.push();
