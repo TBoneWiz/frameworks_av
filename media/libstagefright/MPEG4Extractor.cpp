@@ -5041,7 +5041,12 @@ static bool BetterSniffMPEG4(
             return false;
         }
 
-        off64_t chunkDataSize = offset + chunkSize - chunkDataOffset;
+        // (data_offset - offset) is either 8 or 16
+        off64_t chunkDataSize = chunkSize - (chunkDataOffset - offset);
+        if (chunkDataSize < 0) {
+            ALOGE("b/23540914");
+            return false;
+        }
 
         char chunkstring[5];
         MakeFourCCString(chunkType, chunkstring);
